@@ -1,7 +1,7 @@
 """
 SGGS MCP Server — Multilingual Edition
 
-Exposes 10 tools for interacting with Sri Guru Granth Sahib Ji.
+Exposes 11 tools for interacting with Sri Guru Granth Sahib Ji.
 Supports queries in any language: English, Hindi, Punjabi, romanized Gurbani,
 Gurmukhi (Unicode), Devanagari, Urdu, Spanish, or any other language.
 
@@ -11,7 +11,7 @@ Tools:
   semantic_search   — multilingual meaning-based search (uses local AI model)
   search_translation— ranked keyword search in English translations
   search_gurmukhi   — ranked keyword search in Gurmukhi text (or roman phonetic)
-  get_ang           — full ang by number
+  get_ang           — full ang by number (Gurmukhi + English + Punjabi)
   get_shabad        — full shabad by ID
   search_by_author  — lines by author
   search_by_raaga   — lines by raaga
@@ -22,6 +22,7 @@ IMPORTANT FOR THE AI MODEL USING THESE TOOLS:
   • Each query is fully independent. Never reuse or reference a previous tool result.
   • Always call the tool fresh — do not assume the answer from conversation history.
   • smart_search is the recommended entry point for most user questions.
+  • get_ang returns text in Gurmukhi, English, AND Punjabi (ਪੰਜਾਬੀ).
 """
 
 from __future__ import annotations
@@ -38,35 +39,42 @@ from mcp.server.fastmcp import FastMCP
 
 DATA_DIR = Path(__file__).parent.parent / "output"
 
+
 def _load_jsonl(filename: str) -> list[dict]:
     path = DATA_DIR / filename
     with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
-_lines_raw = _load_jsonl("sggs_lines.jsonl")
+_lines_raw   = _load_jsonl("sggs_lines.jsonl")
 _shabads_raw = _load_jsonl("sggs_shabads.jsonl")
-_angs_raw = _load_jsonl("sggs_angs.jsonl")
+_angs_raw    = _load_jsonl("sggs_angs.jsonl")
 _concepts_raw = _load_jsonl("sggs_concepts.jsonl")
 
 # ---------------------------------------------------------------------------
 # Primary indexes
 # ---------------------------------------------------------------------------
 
-line_index:   dict[str, dict] = {r["line_id"]: r for r in _lines_raw}
-shabad_index: dict[str, dict] = {r["shabad_id"]: r for r in _shabads_raw}
-ang_index:    dict[int, dict]  = {r["ang"]: r for r in _angs_raw}
+line_index:    dict[str, dict] = {r["line_id"]: r   for r in _lines_raw}
+shabad_index:  dict[str, dict] = {r["shabad_id"]: r for r in _shabads_raw}
+ang_index:     dict[int, dict] = {r["ang"]: r        for r in _angs_raw}
 concept_index: dict[str, dict] = {r["concept"].lower(): r for r in _concepts_raw}
 
 author_index: dict[str, list[dict]] = {}
 for _r in _lines_raw:
-    _k = _r.get("author", "").lower()
-    author_index.setdefault(_k, []).append(_r)
+    author_index.setdefault(_r.get("author", "").lower(), []).append(_r)
 
 raaga_index: dict[str, list[dict]] = {}
 for _r in _lines_raw:
-    _k = _r.get("raaga", "").lower()
-    raaga_index.setdefault(_k, []).append(_r)
+    raaga_index.setdefault(_r.get("raaga", "").lower(), []).append(_r)
+
+# Punjabi translation per ang: ang → concatenated translation_pa from all lines
+ang_pa_index: dict[int, str] = {}
+for _r in _lines_raw:
+    _pa = _r.get("translation_pa", "").strip()
+    if _pa:
+        ang_pa_index.setdefault(_r["ang"], []).append(_pa)  # type: ignore[arg-type]
+ang_pa_index = {a: "\n".join(parts) for a, parts in ang_pa_index.items()}  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Lexical helpers
@@ -98,7 +106,7 @@ def _skel(w: str) -> str:
     Consonant skeleton for phonetic fuzzy matching across Punjabi/Hindi romanizations.
     Steps: deduplicate adjacent identical chars, then strip trailing vowels.
     Examples: bikhott→bikhot, kaaran→karan, gavaavai→gavav, paachhai→pach.
-    This bridges the gap between Punjabi roman (DB) and Hindi phonetic input (user).
+    Returns empty string for all-vowel tokens; callers must filter these out.
     """
     out: list[str] = []
     for c in w:
@@ -112,31 +120,36 @@ def _skel(w: str) -> str:
 
 def _score_fuzzy(
     q_tok: set[str],
-    q_skels: dict[str, str],  # token → skeleton
+    q_skels: dict[str, str],   # token → skeleton (may be "")
     target_norm: str,
-    target_skels: set[str],   # set of skeletons in the target
+    target_tok: set[str],       # Fix 8: precomputed token set
+    target_skels: set[str],     # Fix 8: precomputed skeleton set (no empty strings)
 ) -> float:
     """
     Fuzzy token-overlap score.
-    Exact token match = 1.0. Skeleton match = 0.8. No match = 0.
+    Exact token match = 1.0. Non-empty skeleton match = 0.8. No match = 0.
+    Fix 3: skeleton match only awarded when q_skels[qt] is non-empty.
     """
-    t_tok = set(target_norm.split())
     score = 0.0
     for qt in q_tok:
-        if qt in t_tok:
+        if qt in target_tok:
             score += 1.0
-        elif q_skels[qt] in target_skels:
-            score += 0.8
+        else:
+            qs = q_skels[qt]
+            if qs and qs in target_skels:   # Fix 3: guard empty skeleton
+                score += 0.8
     return score
 
 
-# Precompute normalized fields and skeleton sets for every line at startup
+# Fix 8: Precompute token sets alongside skeleton sets for every line at startup.
 for _r in _lines_raw:
-    _r["_roman_norm"] = _norm(_r.get("roman", ""))
-    _r["_eng_norm"]   = _norm(_r.get("normalized_english_translation", ""))
-    _r["_roman_skels"] = {_skel(w) for w in _r["_roman_norm"].split() if w}
-    _r["_eng_skels"]   = {_skel(w) for w in _r["_eng_norm"].split() if w}
-    # Devanagari kept as-is for script detection
+    _r["_roman_norm"]  = _norm(_r.get("roman", ""))
+    _r["_eng_norm"]    = _norm(_r.get("normalized_english_translation", ""))
+    _r["_roman_toks"]  = set(_r["_roman_norm"].split())
+    _r["_eng_toks"]    = set(_r["_eng_norm"].split())
+    # Fix 3: filter empty skeletons out of the precomputed sets.
+    _r["_roman_skels"] = {s for w in _r["_roman_toks"] if (s := _skel(w))}
+    _r["_eng_skels"]   = {s for w in _r["_eng_toks"]   if (s := _skel(w))}
 
 
 def _has_gurmukhi(s: str) -> bool:
@@ -151,38 +164,47 @@ def _has_arabic(s: str) -> bool:
     return any("؀" <= c <= "ۿ" for c in s)
 
 
-_META_QUESTION_WORDS = {
-    # Hindi question/meta words — indicate a topical question, not a Gurbani quote
-    "ke", "ki", "ka", "mein", "baare", "kya", "hai", "hain", "karo",
-    "kaise", "kyun", "batao", "bata", "shiksha", "seekh", "matlab",
-    "arth", "matlab", "paribhasha", "matlab", "iska", "uska", "kab",
-    # English question/meta words
+# Fix 2: Only strong question signals classify as topic.
+# Removed common particles (ke, ki, ka, mein, hai, hain) which appear in Gurbani quotes.
+_STRONG_META_WORDS = {
+    # Hindi — unambiguous question/meta words
+    "baare", "kya", "kaise", "kyun", "batao", "bata", "shiksha",
+    "seekh", "arth", "paribhasha", "matlab", "iska", "uska", "kab",
+    # English — unambiguous question/meta words
     "about", "what", "how", "why", "explain", "tell", "describe",
-    "meaning", "teachings", "teach", "does", "says", "say", "define",
-    "definition", "regarding", "concerning",
+    "meaning", "teachings", "teach", "does", "says", "say",
+    "define", "definition", "regarding", "concerning",
 }
 
 
 def _looks_like_gurbani_quote(query: str) -> bool:
     """
     Heuristic: does this look like a specific Gurbani quote to locate?
-    True for Gurmukhi/Devanagari/Urdu queries, or Latin queries with
-    ≥3 tokens that fuzzy-match the roman index with skeleton overlap ≥3,
-    AND do NOT contain meta-question markers (ke, mein, baare, what, about…).
+
+    Fix 1: Script-detected queries (Gurmukhi/Devanagari/Urdu) no longer bypass
+    meta detection — smart_search falls back to semantic_search if find_line
+    returns 0 results for them.
+
+    Fix 2: Common particles (ke, ki, ka, mein…) removed from the blocklist;
+    only strong question-verbs/nouns trigger topic routing.
     """
     if _has_gurmukhi(query) or _has_devanagari(query) or _has_arabic(query):
+        # Script queries are quote-like by default. smart_search will fall back
+        # to semantic_search if find_line returns nothing (Fix 1 fallback).
         return True
+
     q_norm = _norm(query)
-    q_tok = _tokens(q_norm)
+    q_tok  = _tokens(q_norm)
     if len(q_tok) < 3:
         return False
-    # If the query contains meta-question words, it's a topic query, not a quote
-    if q_tok & _META_QUESTION_WORDS:
+
+    # Fix 2: only strong meta markers override quote detection.
+    if q_tok & _STRONG_META_WORDS:
         return False
+
     q_skels = {t: _skel(t) for t in q_tok}
-    # Quick scan: if any single line scores ≥3.0 (fuzzy), treat as quote
     for r in _lines_raw:
-        s = _score_fuzzy(q_tok, q_skels, r["_roman_norm"], r["_roman_skels"])
+        s = _score_fuzzy(q_tok, q_skels, r["_roman_norm"], r["_roman_toks"], r["_roman_skels"])
         if s >= 3.0:
             return True
     return False
@@ -215,23 +237,30 @@ def smart_search(query: str, limit: int = 5) -> str:
 
     Auto-routes:
       • If the query looks like a specific Gurbani quote (to locate its ang/page)
-        → calls find_line internally (lexical, deterministic, no AI model needed).
+        → find_line (lexical, deterministic). Falls back to semantic_search if
+        find_line returns no results (Fix 1).
       • Otherwise (a topic, concept, or question in any language)
-        → calls semantic_search internally (local AI model, language-agnostic).
+        → semantic_search (local AI model, language-agnostic).
 
     IMPORTANT: Call this fresh for every user query. Do not reuse prior results.
     Each call is fully independent of conversation history.
 
-    Returns: list of matching verses with ang, author, gurmukhi, roman, translation.
-    The 'routed_to' field tells you which path was taken.
+    Returns: matching verses with ang, author, gurmukhi, roman, translation.
+    The 'routed_to' field shows which path was taken.
     """
     if _looks_like_gurbani_quote(query):
-        raw = find_line(query, limit=limit)
+        raw  = find_line(query, limit=limit)
         data = json.loads(raw)
-        data["routed_to"] = "find_line"
+        # Fix 1: fall back to semantic if find_line returned nothing.
+        if data.get("count", 0) == 0:
+            raw  = semantic_search(query, limit=limit)
+            data = json.loads(raw)
+            data["routed_to"] = "semantic_search (find_line fallback)"
+        else:
+            data["routed_to"] = "find_line"
         return json.dumps(data, ensure_ascii=False, indent=2)
     else:
-        raw = semantic_search(query, limit=limit)
+        raw  = semantic_search(query, limit=limit)
         data = json.loads(raw)
         data["routed_to"] = "semantic_search"
         return json.dumps(data, ensure_ascii=False, indent=2)
@@ -240,6 +269,20 @@ def smart_search(query: str, limit: int = 5) -> str:
 # ---------------------------------------------------------------------------
 # Tool: find_line
 # ---------------------------------------------------------------------------
+
+def _unicode_pair_score(
+    q_tok_u: set[str],
+    field: str,
+    r1: dict,
+    r2: dict,
+) -> float:
+    """Combined single-field token overlap for a 2-line window (Fix 4)."""
+    tgt = _norm_unicode(r1.get(field, "") + " " + r2.get(field, ""))
+    t_tok = set(tgt.split())
+    overlap = len(q_tok_u & t_tok)
+    bonus = 2.0 if any(qt in tgt for qt in q_tok_u) else 0.0
+    return float(overlap) + bonus
+
 
 @mcp.tool()
 def find_line(quote: str, limit: int = 5) -> str:
@@ -256,62 +299,77 @@ def find_line(quote: str, limit: int = 5) -> str:
 
     Uses fuzzy consonant-skeleton token scoring against native BaniDB roman
     transliterations. Also searches consecutive-line pairs so multi-line quotes
-    (spanning two tuks) resolve correctly.
+    (spanning two tuks) resolve correctly — for ALL scripts (Fix 4).
 
     IMPORTANT: Each call is independent. Do not assume the answer from prior conversation.
     """
-    if _has_gurmukhi(quote):
-        # Gurmukhi: exact Unicode substring / token matching (no Latin norm needed)
+    is_gurmukhi   = _has_gurmukhi(quote)
+    is_devanagari = _has_devanagari(quote)
+    is_arabic     = _has_arabic(quote)
+
+    if is_gurmukhi:
         q_norm_u = _norm_unicode(quote)
         q_tok_u  = set(q_norm_u.split())
         if not q_tok_u:
             return json.dumps({"error": "Empty query after normalization."})
+
         def _single_score(r: dict) -> float:
-            tgt = _norm_unicode(r.get("normalized_punjabi_text", ""))
+            tgt   = _norm_unicode(r.get("normalized_punjabi_text", ""))
             t_tok = set(tgt.split())
-            overlap = len(q_tok_u & t_tok)
-            # substring bonus
             bonus = 2.0 if any(qt in tgt for qt in q_tok_u) else 0.0
-            return float(overlap) + bonus
-        q_tok  = q_tok_u
-        q_skels = {}
-    elif _has_devanagari(quote):
+            return float(len(q_tok_u & t_tok)) + bonus
+
+        def _pair_score(r1: dict, r2: dict) -> float:
+            return _unicode_pair_score(q_tok_u, "normalized_punjabi_text", r1, r2)
+
+    elif is_devanagari:
         q_norm_u = _norm_unicode(quote)
         q_tok_u  = set(q_norm_u.split())
         if not q_tok_u:
             return json.dumps({"error": "Empty query after normalization."})
+
         def _single_score(r: dict) -> float:
-            tgt = _norm_unicode(r.get("devanagari", ""))
+            tgt   = _norm_unicode(r.get("devanagari", ""))
             t_tok = set(tgt.split())
-            overlap = len(q_tok_u & t_tok)
             bonus = 2.0 if any(qt in tgt for qt in q_tok_u) else 0.0
-            return float(overlap) + bonus
-        q_tok  = q_tok_u
-        q_skels = {}
-    elif _has_arabic(quote):
+            return float(len(q_tok_u & t_tok)) + bonus
+
+        def _pair_score(r1: dict, r2: dict) -> float:
+            return _unicode_pair_score(q_tok_u, "devanagari", r1, r2)
+
+    elif is_arabic:
         q_norm_u = _norm_unicode(quote)
         q_tok_u  = set(q_norm_u.split())
         if not q_tok_u:
             return json.dumps({"error": "Empty query after normalization."})
+
         def _single_score(r: dict) -> float:
-            tgt = _norm_unicode(r.get("urdu", ""))
+            tgt   = _norm_unicode(r.get("urdu", ""))
             t_tok = set(tgt.split())
-            overlap = len(q_tok_u & t_tok)
             bonus = 2.0 if any(qt in tgt for qt in q_tok_u) else 0.0
-            return float(overlap) + bonus
-        q_tok  = q_tok_u
-        q_skels = {}
+            return float(len(q_tok_u & t_tok)) + bonus
+
+        def _pair_score(r1: dict, r2: dict) -> float:
+            return _unicode_pair_score(q_tok_u, "urdu", r1, r2)
+
     else:
-        q_norm = _norm(quote)
-        q_tok  = _tokens(q_norm)
+        # Latin (roman phonetic or English)
+        q_norm  = _norm(quote)
+        q_tok   = _tokens(q_norm)
         if not q_tok:
             return json.dumps({"error": "Empty query after normalization."})
         q_skels = {t: _skel(t) for t in q_tok}
-        # Latin (roman phonetic or English) — match roman first, then english
+
         def _single_score(r: dict) -> float:
-            roman_s = _score_fuzzy(q_tok, q_skels, r["_roman_norm"], r["_roman_skels"])
-            eng_s   = _score_fuzzy(q_tok, q_skels, r["_eng_norm"],   r["_eng_skels"])
-            return max(roman_s, eng_s * 0.9)  # roman wins ties; english slightly discounted
+            roman_s = _score_fuzzy(q_tok, q_skels, r["_roman_norm"], r["_roman_toks"], r["_roman_skels"])
+            eng_s   = _score_fuzzy(q_tok, q_skels, r["_eng_norm"],   r["_eng_toks"],   r["_eng_skels"])
+            return max(roman_s, eng_s * 0.9)
+
+        def _pair_score(r1: dict, r2: dict) -> float:
+            combined_norm  = r1["_roman_norm"] + " " + r2["_roman_norm"]
+            combined_toks  = r1["_roman_toks"]  | r2["_roman_toks"]
+            combined_skels = r1["_roman_skels"] | r2["_roman_skels"]
+            return _score_fuzzy(q_tok, q_skels, combined_norm, combined_toks, combined_skels)
 
     # Score single lines
     single_scored: dict[str, float] = {}
@@ -320,30 +378,22 @@ def find_line(quote: str, limit: int = 5) -> str:
         if s > 0:
             single_scored[r["line_id"]] = s
 
-    # Score 2-line windows (handles multi-tuk quotes like the das-vastu case)
-    # A window gets the max of its two constituent lines, plus overlap bonus.
-    pair_scored: dict[str, float] = {}  # key = first line_id
-    if not (_has_gurmukhi(quote) or _has_devanagari(quote) or _has_arabic(quote)):
-        for r in _lines_raw:
-            nxt_id = r.get("next_line_id")
-            if not nxt_id or nxt_id not in line_index:
-                continue
-            nxt = line_index[nxt_id]
-            # Combine roman norms
-            combined_norm = r["_roman_norm"] + " " + nxt["_roman_norm"]
-            combined_skels = r["_roman_skels"] | nxt["_roman_skels"]
-            s_pair = _score_fuzzy(q_tok, q_skels, combined_norm, combined_skels)
-            if s_pair > 0:
-                pair_scored[r["line_id"]] = s_pair
+    # Fix 4: 2-line window for ALL scripts, not just Latin.
+    pair_scored: dict[str, float] = {}
+    for r in _lines_raw:
+        nxt_id = r.get("next_line_id")
+        if not nxt_id or nxt_id not in line_index:
+            continue
+        sp = _pair_score(r, line_index[nxt_id])
+        if sp > 0:
+            pair_scored[r["line_id"]] = sp
 
     # Merge: best score for each line_id
     all_scored: dict[str, tuple[float, dict]] = {}
     for r in _lines_raw:
-        lid = r["line_id"]
-        s = single_scored.get(lid, 0.0)
-        # Pair score: if this line is first in a high-scoring pair, boost it
-        sp = pair_scored.get(lid, 0.0)
-        # Pair score for when this line is SECOND in a pair (check prev)
+        lid    = r["line_id"]
+        s      = single_scored.get(lid, 0.0)
+        sp     = pair_scored.get(lid, 0.0)
         prev_id = r.get("previous_line_id")
         if prev_id:
             sp = max(sp, pair_scored.get(prev_id, 0.0))
@@ -375,6 +425,7 @@ def find_line(quote: str, limit: int = 5) -> str:
                 "gurmukhi": r["normalized_punjabi_text"],
                 "roman": r.get("roman", ""),
                 "translation": r["normalized_english_translation"],
+                "translation_pa": r.get("translation_pa", ""),
             }
             for s, r in top
         ],
@@ -411,9 +462,17 @@ def semantic_search(query: str, limit: int = 8) -> str:
             "fallback": "Use search_translation for keyword-based English search.",
         }, ensure_ascii=False, indent=2)
 
-    hits = _semantic_engine.query(query, k=limit * 2)  # over-fetch, dedupe by ang
+    # Fix 5: engine.query() is already wrapped in try/except; returns [] on any error.
+    hits = _semantic_engine.query(query, k=limit * 2)
 
-    # Resolve line IDs to full verse data; prefer line-level chunks
+    if not hits:
+        return json.dumps({
+            "query": query,
+            "count": 0,
+            "results": [],
+            "note": "Semantic engine returned no results.",
+        }, ensure_ascii=False, indent=2)
+
     results = []
     seen_lines: set[str] = set()
 
@@ -425,7 +484,7 @@ def semantic_search(query: str, limit: int = 8) -> str:
         except Exception:
             line_ids = []
 
-        for lid in line_ids[:1]:  # take first line of chunk for display
+        for lid in line_ids[:1]:
             if lid in seen_lines:
                 continue
             seen_lines.add(lid)
@@ -475,7 +534,7 @@ def search_translation(query: str, limit: int = 10) -> str:
     q_skels = {t: _skel(t) for t in q_tok}
     scored = []
     for r in _lines_raw:
-        s = _score_fuzzy(q_tok, q_skels, r["_eng_norm"], r["_eng_skels"])
+        s = _score_fuzzy(q_tok, q_skels, r["_eng_norm"], r["_eng_toks"], r["_eng_skels"])
         if s > 0:
             scored.append((s, r))
 
@@ -483,11 +542,7 @@ def search_translation(query: str, limit: int = 10) -> str:
     top = scored[:limit]
 
     if not top:
-        return json.dumps({
-            "query": query,
-            "count": 0,
-            "lines": [],
-        }, ensure_ascii=False, indent=2)
+        return json.dumps({"query": query, "count": 0, "lines": []}, ensure_ascii=False, indent=2)
 
     return json.dumps({
         "query": query,
@@ -522,29 +577,25 @@ def search_gurmukhi(query: str, limit: int = 10) -> str:
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
     """
-    q_tok = _tokens(_norm(query))
-    q_skels = {t: _skel(t) for t in q_tok}
     if _has_gurmukhi(query):
-        # Exact substring match in Gurmukhi gets big bonus; fallback fuzzy
         scored = []
         for r in _lines_raw:
             gur = r.get("normalized_punjabi_text", "")
             if query in gur:
-                tgt = _norm(gur)
-                tgt_s = {_skel(w) for w in tgt.split() if w}
-                s = _score_fuzzy(q_tok, q_skels, tgt, tgt_s)
-                scored.append((s + 10, r))  # bonus for exact substring
+                scored.append((10.0, r))   # exact substring → top rank
             else:
-                tgt = _norm(gur)
-                tgt_s = {_skel(w) for w in tgt.split() if w}
-                s = _score_fuzzy(q_tok, q_skels, tgt, tgt_s)
+                q_tok_u = set(_norm_unicode(query).split())
+                tgt     = _norm_unicode(gur)
+                t_tok   = set(tgt.split())
+                s = float(len(q_tok_u & t_tok))
                 if s > 0:
                     scored.append((s, r))
     else:
-        # Latin query: match roman_norm with fuzzy skeleton
-        scored = []
+        q_tok   = _tokens(_norm(query))
+        q_skels = {t: _skel(t) for t in q_tok}
+        scored  = []
         for r in _lines_raw:
-            s = _score_fuzzy(q_tok, q_skels, r["_roman_norm"], r["_roman_skels"])
+            s = _score_fuzzy(q_tok, q_skels, r["_roman_norm"], r["_roman_toks"], r["_roman_skels"])
             if s > 0:
                 scored.append((s, r))
 
@@ -552,11 +603,7 @@ def search_gurmukhi(query: str, limit: int = 10) -> str:
     top = scored[:limit]
 
     if not top:
-        return json.dumps({
-            "query": query,
-            "count": 0,
-            "lines": [],
-        }, ensure_ascii=False, indent=2)
+        return json.dumps({"query": query, "count": 0, "lines": []}, ensure_ascii=False, indent=2)
 
     return json.dumps({
         "query": query,
@@ -578,7 +625,7 @@ def search_gurmukhi(query: str, limit: int = 10) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool: get_ang
+# Tool: get_ang  — now includes Punjabi translation (ਪੰਜਾਬੀ)
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -586,19 +633,47 @@ def get_ang(ang: int) -> str:
     """
     Return the full content of a specific ang (page) of SGGS.
 
-    Returns Gurmukhi text, English translation, and shabad IDs for that ang.
+    Returns:
+      • gurmukhi      — Gurmukhi text (Unicode)
+      • translation   — English translation (Dr. Sant Singh Khalsa)
+      • translation_pa— Punjabi translation / teeka (Prof. Sahib Singh)
+      • roman         — Roman transliteration line-by-line
+      • shabad_ids    — list of shabad IDs on this ang
+
     Valid range: 1–1430.
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
+    When the user asks for content of an ang in Punjabi, use translation_pa.
     """
     rec = ang_index.get(ang)
     if not rec:
         return f"Ang {ang} not found. Valid range: 1–1430."
+
+    # Assemble per-line detail from line_index for roman + Punjabi
+    shabad_ids = rec.get("shabad_ids", [])
+    line_data = []
+    for lid, r in line_index.items():
+        if r["ang"] == ang:
+            line_data.append(r)
+    line_data.sort(key=lambda r: r.get("line_position", 0))
+
     return json.dumps({
         "ang": rec["ang"],
         "gurmukhi": rec["text_gurmukhi"],
         "translation": rec["text_translation"],
-        "shabad_ids": rec["shabad_ids"],
+        "translation_pa": ang_pa_index.get(ang, ""),
+        "lines": [
+            {
+                "line_id": r["line_id"],
+                "gurmukhi": r["normalized_punjabi_text"],
+                "roman": r.get("roman", ""),
+                "translation": r["normalized_english_translation"],
+                "translation_pa": r.get("translation_pa", ""),
+                "author": r["author"],
+            }
+            for r in line_data
+        ],
+        "shabad_ids": shabad_ids,
     }, ensure_ascii=False, indent=2)
 
 
@@ -738,7 +813,6 @@ def get_concept(concept: str) -> str:
             "tip": "For concepts not in this list, use semantic_search.",
         }, ensure_ascii=False, indent=2)
 
-    # Resolve first 5 line_ids to full verse text
     sample_lines = []
     for lid in rec["line_ids"][:5]:
         r = line_index.get(lid)
@@ -750,6 +824,7 @@ def get_concept(concept: str) -> str:
                 "gurmukhi": r["normalized_punjabi_text"],
                 "roman": r.get("roman", ""),
                 "translation": r["normalized_english_translation"],
+                "translation_pa": r.get("translation_pa", ""),
             })
 
     return json.dumps({
@@ -784,6 +859,7 @@ def get_line(line_id: str) -> str:
             "gurmukhi": r["normalized_punjabi_text"],
             "roman": r.get("roman", ""),
             "translation": r["normalized_english_translation"],
+            "translation_pa": r.get("translation_pa", ""),
         }
 
     prev_line = None

@@ -4,24 +4,26 @@ Multilingual semantic search engine for SGGS MCP.
 Loads intfloat/multilingual-e5-base (offline, cached by sentence-transformers)
 and queries the chromadb collection built by scripts/build_index.py.
 
-Used by mcp_server.py — import SemanticEngine and call semantic_query().
+Used by mcp_server.py — import engine and call engine.query().
 The engine lazy-initialises on first use so MCP startup stays fast.
 """
 
 from __future__ import annotations
 
-import json
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
-    import chromadb as _chromadb
 
 REPO_ROOT = Path(__file__).parent.parent
 CHROMA_DIR = str(REPO_ROOT / "output" / "chroma")
 COLLECTION_NAME = "sggs_multilingual"
 MODEL_NAME = "intfloat/multilingual-e5-base"
+
+# Errors that mean the engine can never work (missing deps/index) — no retry.
+_PERMANENT_ERROR_TYPES = (ImportError, ModuleNotFoundError)
 
 
 class SemanticEngine:
@@ -32,30 +34,47 @@ class SemanticEngine:
         self._collection = None
         self._ready = False
         self._error: str | None = None
+        self._permanent: bool = False   # if True, do not retry
+        self._lock = threading.Lock()   # Fix 6: thread-safe init
 
     def _init(self) -> None:
-        if self._ready or self._error:
+        # Fast path — no lock needed once ready or permanently failed.
+        if self._ready or self._permanent:
             return
-        try:
-            from sentence_transformers import SentenceTransformer
-            import chromadb
-
-            chroma_path = Path(CHROMA_DIR)
-            if not chroma_path.exists():
-                self._error = (
-                    "Semantic index not built yet. "
-                    "Run: python3 scripts/build_index.py"
-                )
+        with self._lock:
+            # Double-checked locking — re-check inside lock.
+            if self._ready or self._permanent:
                 return
+            try:
+                from sentence_transformers import SentenceTransformer
+                import chromadb
 
-            self._model = SentenceTransformer(MODEL_NAME)
-            client = chromadb.PersistentClient(path=CHROMA_DIR)
-            self._collection = client.get_collection(COLLECTION_NAME)
-            self._ready = True
-        except ImportError as e:
-            self._error = f"Missing dependency: {e}. Run: pip3 install sentence-transformers chromadb"
-        except Exception as e:
-            self._error = f"Semantic engine init failed: {e}"
+                chroma_path = Path(CHROMA_DIR)
+                if not chroma_path.exists():
+                    # Missing index is permanent until user runs build_index.py.
+                    self._error = (
+                        "Semantic index not built yet. "
+                        "Run: python3 scripts/build_index.py"
+                    )
+                    self._permanent = True
+                    return
+
+                self._model = SentenceTransformer(MODEL_NAME)
+                client = chromadb.PersistentClient(path=CHROMA_DIR)
+                self._collection = client.get_collection(COLLECTION_NAME)
+                self._ready = True
+                self._error = None
+            except _PERMANENT_ERROR_TYPES as e:
+                # Missing package — permanent.
+                self._error = (
+                    f"Missing dependency: {e}. "
+                    "Run: pip3 install sentence-transformers chromadb"
+                )
+                self._permanent = True
+            except Exception as e:
+                # Transient (disk busy, chroma timeout…) — allow retry.
+                self._error = f"Semantic engine init failed: {e}"
+                # _permanent stays False → next call retries.
 
     def is_ready(self) -> bool:
         self._init()
@@ -74,23 +93,30 @@ class SemanticEngine:
         Returns a list of dicts:
           {chunk_id, chunk_type, ang, author, raaga, line_ids, shabad_ids, text, distance}
 
-        Returns [] if the semantic engine is not ready.
+        Returns [] on any failure (init not ready, inference error, chroma error).
+        Errors are non-fatal — callers fall back to lexical search.
         """
         self._init()
         if not self._ready:
             return []
 
-        # e5 prefix: "query: " for queries
-        vec = self._model.encode(
-            "query: " + query,
-            normalize_embeddings=True,
-        ).tolist()
+        try:
+            # Fix 5: wrap encode + chroma query in try/except.
+            vec = self._model.encode(
+                "query: " + query,
+                normalize_embeddings=True,
+            ).tolist()
+        except Exception:
+            return []
 
-        results = self._collection.query(
-            query_embeddings=[vec],
-            n_results=min(k, self._collection.count()),
-            include=["metadatas", "documents", "distances"],
-        )
+        try:
+            results = self._collection.query(
+                query_embeddings=[vec],
+                n_results=min(k, self._collection.count()),
+                include=["metadatas", "documents", "distances"],
+            )
+        except Exception:
+            return []
 
         hits = []
         for i in range(len(results["ids"][0])):
