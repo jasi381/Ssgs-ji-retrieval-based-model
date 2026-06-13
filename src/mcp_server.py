@@ -2,8 +2,9 @@
 SGGS MCP Server — Multilingual Edition
 
 Exposes 11 tools for interacting with Sri Guru Granth Sahib Ji.
-Supports queries in any language: English, Hindi, Punjabi, romanized Gurbani,
-Gurmukhi (Unicode), Devanagari, Urdu, Spanish, or any other language.
+Supports deterministic lookup for Gurmukhi, romanized Gurbani, Devanagari,
+Urdu, and English translation fragments, plus multilingual semantic search
+through the configured embedding model.
 
 Tools:
   smart_search      — auto-routes: quote → find_line, topic → semantic_search
@@ -230,16 +231,16 @@ mcp = FastMCP("SGGS-Multilingual")
 @mcp.tool()
 def smart_search(query: str, limit: int = 5) -> str:
     """
-    Intelligent multilingual search — use this as your primary entry point.
+    Intelligent SGGS search — use this as your primary entry point.
 
-    Accepts queries in ANY language: English, Hindi, Punjabi, romanized Gurbani,
-    Gurmukhi, Devanagari, Urdu, Spanish, or any other language.
+    Accepts exact quotes, phonetic romanized Gurbani, Gurmukhi, Devanagari,
+    Urdu, English translation fragments, and multilingual topical queries.
 
     Auto-routes:
       • If the query looks like a specific Gurbani quote (to locate its ang/page)
         → find_line (lexical, deterministic). Falls back to semantic_search if
         find_line returns no results (Fix 1).
-      • Otherwise (a topic, concept, or question in any language)
+      • Otherwise (a topic, concept, or question)
         → semantic_search (local AI model, language-agnostic).
 
     IMPORTANT: Call this fresh for every user query. Do not reuse prior results.
@@ -441,12 +442,12 @@ def semantic_search(query: str, limit: int = 8) -> str:
     """
     Multilingual meaning-based search across the entire SGGS corpus.
 
-    Works with ANY language — type your query in English, Hindi, Punjabi,
-    Spanish, Urdu, or any other language. Returns the most semantically
-    relevant verses, not just keyword matches.
+    Uses a multilingual embedding model for meaning-based search. Quality can
+    vary by language/query, so verify returned verses before presenting them as
+    authoritative.
 
     Ideal for:
-      • Topical questions: "kaam ke baare mein shiksha" (Hindi)
+      • Topical questions: "teachings about ego and pride"
       • Thematic search: "teachings about ego and pride"
       • Conceptual queries: "what does SGGS say about forgiveness?"
       • Any language: "¿qué enseña el Gurú sobre el amor?" (Spanish)

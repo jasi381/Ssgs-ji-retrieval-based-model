@@ -7,7 +7,7 @@ Built on [BaniDB](https://github.com/KhalisFoundation/BaniDB) by Khalis Foundati
 
 ## What It Does
 
-Ask about Gurbani in **any language** — English, Hindi, Punjabi, romanized Gurbani, Gurmukhi, Devanagari, Urdu, Spanish — and get the exact verse, Ang, author, and Punjabi teekas back.
+Ask about Gurbani with exact quotes, phonetic romanized text, Gurmukhi, Devanagari, Urdu, English translation fragments, and selected topical queries. Results include the verse, Ang, author, and Punjabi teekas when present in BaniDB.
 
 ```
 Query:  "das vastu le paache paave ek karan bikhot gaavave"
@@ -15,8 +15,8 @@ Result: Ang 268 · Guru Arjan Dev Ji · Raag Gauree  ← rank 1, score 7.0
 ```
 
 ```
-Query:  "kaam ke baare mein kya shiksha hai"  (Hindi)
-Result: semantic search → relevant verses on kaam across SGGS
+Query:  "for the sake of one thing withheld"
+Result: Ang 268 · Guru Arjan Dev Ji · Raag Gauree  ← English translation fragment match
 ```
 
 ---
@@ -36,16 +36,16 @@ Claude Desktop / any LLM
   ├── search_gurmukhi()
   ├── search_translation()
   ├── get_concept()
-  ├── list_authors()
-  ├── list_raagas()
-  └── get_status()
+  ├── search_by_author()
+  ├── search_by_raaga()
+  └── get_line()
         │
   src/search_engine.py       ← lazy-loading semantic engine
         │
   output/chroma/             ← 66,104 embeddings (ChromaDB, local)
 ```
 
-**Embedding model:** `intfloat/multilingual-e5-base` — runs fully offline, no API key needed.
+**Embedding model:** `intfloat/multilingual-e5-base` — runs locally after the one-time model download/cache step. No hosted inference API is required.
 
 ---
 
@@ -63,12 +63,13 @@ Claude Desktop / any LLM
 
 All sourced from BaniDB (`source_id = 1`, SGGS only).
 
+The generated `output/` artifacts are ignored by git in this repo. Clone users must regenerate them from BaniDB or obtain them through a separate release/dataset package.
+
 ---
 
-## Scholar Review
+## Review Status
 
-`reports/scholar_review.md` — 11/11 PASS.  
-Zero contamination. Raagmala authorship debate documented.
+The corpus is sourced from BaniDB (`source_id = 1`) and the code includes deterministic retrieval tools for quote and Ang lookup. A formal scholar-review report is not included in this repository yet, so review claims should be added only after that artifact exists.
 
 ---
 
@@ -87,7 +88,11 @@ python3 scripts/extract_multilingual.py   # pull multilingual data from BaniDB
 python3 scripts/build_index.py            # embed + persist to output/chroma/
 ```
 
-Requires `database.sqlite` (BaniDB) at project root or set `DB_PATH` env var.
+Requires `database.sqlite` (BaniDB) at project root or set the `DB_PATH` env var:
+
+```bash
+DB_PATH=/path/to/database.sqlite python3 scripts/extract_multilingual.py
+```
 
 ### 3. Register with Claude Desktop
 
@@ -131,10 +136,10 @@ Restart Claude Desktop. Tools appear as `sggs-multilingual`.
 
 ## Training Dataset
 
-`output/training_dataset.jsonl` — 60,021 QA pairs, scholar-reviewed.  
+`output/training_dataset.jsonl` — 60,021 generated QA pairs.  
 Format: `{"question": "...", "answer": "...", "ang": 268, "author": "..."}`
 
-Suitable for fine-tuning a Gurbani-specific language model.
+Potentially useful for experiments or fine-tuning after license review, quality evaluation, and scholar review.
 
 ---
 

@@ -16,12 +16,13 @@ Transliterations:
 """
 
 import json
+import os
 import sqlite3
 import sys
 import time
 from pathlib import Path
 
-DB_PATH = Path("/Users/jasmeetsingh/Desktop/database.sqlite")
+DB_PATH = Path(os.environ.get("DB_PATH", Path(__file__).parent.parent / "database.sqlite"))
 OUTPUT_DIR = Path(__file__).parent.parent / "output"
 LINES_JSONL = OUTPUT_DIR / "sggs_lines.jsonl"
 CHUNKS_JSONL = OUTPUT_DIR / "embedding_chunks.jsonl"
