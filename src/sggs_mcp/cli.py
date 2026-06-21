@@ -33,8 +33,8 @@ def run_server_http(host: str = "0.0.0.0", port: int = 8000) -> int:
     from .server import mcp
 
     port = int(os.environ.get("PORT", port))
-    os.environ.setdefault("FASTMCP_HOST", host)
-    os.environ.setdefault("FASTMCP_PORT", str(port))
+    os.environ["FASTMCP_HOST"] = host
+    os.environ["FASTMCP_PORT"] = str(port)
     mcp.run(transport="streamable-http")
     return 0
 
