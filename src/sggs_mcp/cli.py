@@ -30,12 +30,12 @@ def run_server() -> int:
 
 def run_server_http(host: str = "0.0.0.0", port: int = 8000) -> int:
     import os
-    import uvicorn
 
     port = int(os.environ.get("PORT", port))
     from .server import mcp
-    app = mcp.http_app()
-    uvicorn.run(app, host=host, port=port)
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.run(transport="streamable-http")
     return 0
 
 
