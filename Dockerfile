@@ -8,10 +8,11 @@ WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
-
 RUN pip install --no-cache-dir .
 
-VOLUME ["/data"]
+COPY output/ /data/
+
+EXPOSE 8000
 
 ENTRYPOINT ["sggs-mcp"]
-CMD ["serve"]
+CMD ["serve-http", "--host", "0.0.0.0", "--port", "8000"]
