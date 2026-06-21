@@ -28,6 +28,13 @@ def run_server() -> int:
     return 0
 
 
+def run_server_http(host: str = "0.0.0.0", port: int = 8000) -> int:
+    from .server import mcp
+
+    mcp.run(transport="streamable-http", host=host, port=port)
+    return 0
+
+
 def doctor() -> int:
     print(f"sggs-mcp {__version__}")
     print(f"Data directory: {data_dir()}")
@@ -120,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("serve", help="Run the MCP server over stdio.")
+    http_parser = subparsers.add_parser("serve-http", help="Run the MCP server over HTTP (streamable-http transport).")
+    http_parser.add_argument("--host", default="0.0.0.0", help="Host to bind (default: 0.0.0.0).")
+    http_parser.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000).")
     subparsers.add_parser("doctor", help="Check dependencies, data files, and index state.")
     subparsers.add_parser("build-index", help="Build the Chroma semantic index.")
     subparsers.add_parser("extract-multilingual", help="Enrich data from BaniDB database.sqlite.")
@@ -133,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "serve":
         return run_server()
+    if command == "serve-http":
+        return run_server_http(host=args.host, port=args.port)
     if command == "doctor":
         return doctor()
     if command == "build-index":
