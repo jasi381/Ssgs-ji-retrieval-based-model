@@ -1,0 +1,22 @@
+SGGS MCP Retrieval Server
+=========================
+
+This repository contains MCP server code for multilingual retrieval over Sri
+Guru Granth Sahib Ji data.
+
+Data and Attribution
+--------------------
+
+The corpus workflow is built around BaniDB by Khalis Foundation:
+https://github.com/KhalisFoundation/BaniDB
+
+The generated data may include or derive from:
+- Sri Guru Granth Sahib Ji text
+- English translation attributed in the source workflow to Dr. Sant Singh Khalsa
+- Punjabi teeka attributed in the source workflow to Prof. Sahib Singh
+- Spanish translation attributed in the source workflow to SikhNet
+
+The MIT license in this repository applies to the code and documentation only.
+Before publishing generated JSONL, Chroma indexes, embeddings, or packaged data
+bundles, verify the source licenses and redistribution permissions for every
+corpus and translation source.

@@ -1,0 +1,18 @@
+{
+  "name": "sggs-mcp",
+  "description": "Multilingual MCP retrieval server for Sri Guru Granth Sahib Ji. Supports Gurmukhi, romanized Gurbani, Devanagari, Urdu, English translation fragments, Ang lookup, shabad lookup, and local semantic search.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": "https://github.com/jasi381/Ssgs-ji-retrieval-based-model",
+  "command": "sggs-mcp",
+  "args": ["serve"],
+  "env": {
+    "SGGS_DATA_DIR": {
+      "description": "Directory containing BaniDB corpus artifacts (sggs_lines.jsonl, chroma index, etc). Corpus artifacts are not bundled pending source-license review. Users must set this to an approved local data directory.",
+      "required": true
+    }
+  },
+  "package": {
+    "pypi": "sggs-mcp"
+  }
+}

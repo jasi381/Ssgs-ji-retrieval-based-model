@@ -1,4 +1,5 @@
 # SGGS Multilingual AI — MCP Retrieval Server
+mcp-name: io.github.jasi381/sggs-mcp
 
 Semantic search and retrieval system for Sri Guru Granth Sahib Ji.  
 Built on [BaniDB](https://github.com/KhalisFoundation/BaniDB) by Khalis Foundation.
@@ -73,28 +74,76 @@ The corpus is sourced from BaniDB (`source_id = 1`) and the code includes determ
 
 ---
 
-## Setup
+## Install
 
-### 1. Install dependencies
+### Option A: package install
 
 ```bash
-pip install -r requirements.txt
+pipx install sggs-mcp
 ```
 
-### 2. Build the semantic index (one-time, ~10 min)
+Run the server:
 
 ```bash
-python3 scripts/extract_multilingual.py   # pull multilingual data from BaniDB
-python3 scripts/build_index.py            # embed + persist to output/chroma/
+sggs-mcp serve
+```
+
+### Option B: local checkout
+
+```bash
+pip install -e ".[dev]"
+sggs-mcp doctor
+```
+
+The legacy direct scripts still work from a checkout:
+
+```bash
+python3 src/mcp_server.py
+python3 scripts/extract_multilingual.py
+python3 scripts/build_index.py
+```
+
+## Data Setup
+
+The server needs generated data files in `output/` or in the directory pointed
+to by `SGGS_DATA_DIR`.
+
+Required files:
+
+- `sggs_lines.jsonl`
+- `sggs_shabads.jsonl`
+- `sggs_angs.jsonl`
+- `sggs_concepts.jsonl`
+- `embedding_chunks.jsonl`
+- `chroma/`
+
+Validate the runtime:
+
+```bash
+SGGS_DATA_DIR=/path/to/output sggs-mcp doctor
+```
+
+Build the semantic index from a local BaniDB database:
+
+```bash
+sggs-mcp extract-multilingual
+sggs-mcp build-index
 ```
 
 Requires `database.sqlite` (BaniDB) at project root or set the `DB_PATH` env var:
 
 ```bash
-DB_PATH=/path/to/database.sqlite python3 scripts/extract_multilingual.py
+DB_PATH=/path/to/database.sqlite sggs-mcp extract-multilingual
 ```
 
-### 3. Register with Claude Desktop
+Public data-bundle downloads are intentionally not hard-coded until corpus and
+translation redistribution rights are reviewed:
+
+```bash
+sggs-mcp download-data --url https://example.org/approved-data-bundle.zip
+```
+
+## Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -102,14 +151,46 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "sggs-multilingual": {
-      "command": "python3",
-      "args": ["/path/to/src/mcp_server.py"]
+      "command": "sggs-mcp",
+      "args": ["serve"],
+      "env": {
+        "SGGS_DATA_DIR": "/absolute/path/to/output"
+      }
     }
   }
 }
 ```
 
 Restart Claude Desktop. Tools appear as `sggs-multilingual`.
+
+More detail: [docs/claude.md](docs/claude.md)
+
+## Codex
+
+Codex can run this server as a local stdio MCP:
+
+```bash
+codex mcp add sggs --env SGGS_DATA_DIR=/absolute/path/to/output -- sggs-mcp serve
+```
+
+More detail: [docs/codex.md](docs/codex.md)
+
+## MCP Inspector
+
+```bash
+SGGS_DATA_DIR=/absolute/path/to/output npx @modelcontextprotocol/inspector sggs-mcp serve
+```
+
+More detail: [docs/mcp-inspector.md](docs/mcp-inspector.md)
+
+## Distribution Status
+
+The code is packaged for local Python distribution through `sggs-mcp`. Generated
+corpus artifacts are not licensed by this repository's MIT license. Complete the
+source-license review in [NOTICE](NOTICE) before publishing JSONL, embeddings,
+Chroma indexes, or hosted data bundles.
+
+Publishing guide: [docs/publishing.md](docs/publishing.md)
 
 ---
 
