@@ -11,6 +11,7 @@ The engine lazy-initialises on first use so MCP startup stays fast.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import chroma_dir
@@ -62,6 +63,14 @@ class SemanticEngine:
                 self._model = SentenceTransformer(MODEL_NAME)
                 client = chromadb.PersistentClient(path=CHROMA_DIR)
                 self._collection = client.get_collection(COLLECTION_NAME)
+                vector_count = self._collection.count()
+                if vector_count == 0:
+                    self._error = (
+                        "Semantic index is empty (0 vectors). "
+                        "Run: sggs-mcp build-index and redeploy."
+                    )
+                    # Transient — allow retry after a good redeploy.
+                    return
                 self._ready = True
                 self._error = None
             except _PERMANENT_ERROR_TYPES as e:
@@ -79,6 +88,12 @@ class SemanticEngine:
     def is_ready(self) -> bool:
         self._init()
         return self._ready
+
+    def count(self) -> int:
+        """Return number of indexed vectors, or 0 if not ready."""
+        if self._ready and self._collection is not None:
+            return self._collection.count()
+        return 0
 
     def status(self) -> str:
         self._init()

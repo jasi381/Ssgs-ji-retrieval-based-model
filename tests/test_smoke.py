@@ -68,8 +68,20 @@ def test_smoke_all_tool_functions(monkeypatch):
     smart = _json_result(server.smart_search("for the sake of one thing withheld", limit=2))
     assert "routed_to" in smart
 
+    # English topical query must return results — either via semantic or keyword fallback.
+    smart_ego = _json_result(server.smart_search("teachings about ego", limit=2))
+    assert smart_ego.get("count", 0) > 0, (
+        f"smart_search returned 0 for English topical query — "
+        f"semantic + keyword fallback both failed: {smart_ego}"
+    )
+
+    # semantic_search directly: may be unavailable (no deps) or have results —
+    # but must NEVER return empty results without an error or count > 0.
     semantic = _json_result(server.semantic_search("teachings about ego", limit=1))
-    assert "results" in semantic or "error" in semantic
+    assert "error" in semantic or semantic.get("count", 0) > 0, (
+        f"semantic_search returned empty results with no error — "
+        f"index may be built but empty: {semantic}"
+    )
 
     translation = _json_result(server.search_translation("truth", limit=2))
     assert "lines" in translation

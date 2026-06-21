@@ -237,6 +237,41 @@ except TypeError:
 
 
 # ---------------------------------------------------------------------------
+# Keyword fallback helpers (used by smart_search when semantic is unavailable)
+# ---------------------------------------------------------------------------
+
+def _needs_semantic_fallback(data: dict) -> bool:
+    """True when a semantic_search response has no usable results."""
+    return "error" in data or data.get("count", 0) == 0
+
+
+def _keyword_fallback(query: str, limit: int) -> dict:
+    """
+    Reshape search_translation output into the same verse dict shape that
+    semantic_search returns so smart_search callers see a consistent structure.
+    """
+    raw = search_translation(query, limit=limit)
+    kw  = json.loads(raw)
+    results = []
+    for line in kw.get("lines", [])[:limit]:
+        lid = line.get("line_id", "")
+        r   = line_index.get(lid, {})
+        results.append({
+            "ang":             line.get("ang", r.get("ang", "")),
+            "line_id":         lid,
+            "shabad_id":       r.get("shabad_id", ""),
+            "author":          line.get("author", ""),
+            "raaga":           line.get("raaga", ""),
+            "gurmukhi":        line.get("gurmukhi", ""),
+            "roman":           r.get("roman", ""),
+            "translation":     line.get("translation", ""),
+            "translation_pa":  r.get("translation_pa", ""),
+            "relevance_score": round(min(line.get("score", 0.0) / 10.0, 1.0), 4),
+        })
+    return {"query": query, "count": len(results), "results": results}
+
+
+# ---------------------------------------------------------------------------
 # Tool: smart_search
 # ---------------------------------------------------------------------------
 
@@ -251,9 +286,11 @@ def smart_search(query: str, limit: int = 5) -> str:
     Auto-routes:
       • If the query looks like a specific Gurbani quote (to locate its ang/page)
         → find_line (lexical, deterministic). Falls back to semantic_search if
-        find_line returns no results (Fix 1).
+        find_line returns no results.
       • Otherwise (a topic, concept, or question)
         → semantic_search (local AI model, language-agnostic).
+      • If semantic_search is unavailable or returns 0 results
+        → search_translation (keyword fallback, always available).
 
     IMPORTANT: Call this fresh for every user query. Do not reuse prior results.
     Each call is fully independent of conversation history.
@@ -264,18 +301,25 @@ def smart_search(query: str, limit: int = 5) -> str:
     if _looks_like_gurbani_quote(query):
         raw  = find_line(query, limit=limit)
         data = json.loads(raw)
-        # Fix 1: fall back to semantic if find_line returned nothing.
         if data.get("count", 0) == 0:
             raw  = semantic_search(query, limit=limit)
             data = json.loads(raw)
-            data["routed_to"] = "semantic_search (find_line fallback)"
+            if _needs_semantic_fallback(data):
+                data = _keyword_fallback(query, limit)
+                data["routed_to"] = "search_translation (semantic fallback)"
+            else:
+                data["routed_to"] = "semantic_search (find_line fallback)"
         else:
             data["routed_to"] = "find_line"
         return json.dumps(data, ensure_ascii=False, indent=2)
     else:
         raw  = semantic_search(query, limit=limit)
         data = json.loads(raw)
-        data["routed_to"] = "semantic_search"
+        if _needs_semantic_fallback(data):
+            data = _keyword_fallback(query, limit)
+            data["routed_to"] = "search_translation (semantic fallback)"
+        else:
+            data["routed_to"] = "semantic_search"
         return json.dumps(data, ensure_ascii=False, indent=2)
 
 

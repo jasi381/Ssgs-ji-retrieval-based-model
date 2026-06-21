@@ -56,7 +56,16 @@ def doctor() -> int:
         print("\nData files: OK")
 
     if chroma_dir().exists():
-        print("Semantic index: OK")
+        try:
+            from .search_engine import engine as _eng
+            n = _eng.count()
+            if n > 0:
+                print(f"Semantic index: OK ({n} vectors)")
+            else:
+                ok = False
+                print("Semantic index: EMPTY (0 vectors) — run `sggs-mcp build-index` and redeploy.")
+        except Exception as exc:
+            print(f"Semantic index: present on disk but engine error: {exc}")
     else:
         ok = False
         print("Semantic index: missing. Run `sggs-mcp build-index` after data extraction.")
