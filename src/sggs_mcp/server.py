@@ -231,9 +231,9 @@ SERVER_INSTRUCTIONS = (
 )
 
 try:
-    mcp = FastMCP("SGGS-Multilingual", instructions=SERVER_INSTRUCTIONS)
+    mcp = FastMCP("SGGS-Multilingual", host="0.0.0.0", instructions=SERVER_INSTRUCTIONS)
 except TypeError:
-    mcp = FastMCP("SGGS-Multilingual")
+    mcp = FastMCP("SGGS-Multilingual", host="0.0.0.0")
 
 
 # ---------------------------------------------------------------------------
