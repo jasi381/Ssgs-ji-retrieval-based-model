@@ -42,7 +42,10 @@ def main():
 
     print(f"Opening chromadb at {CHROMA_DIR} ...")
     import chromadb
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = chromadb.PersistentClient(
+        path=CHROMA_DIR,
+        settings=chromadb.Settings(anonymized_telemetry=False),
+    )
 
     # Clear existing collection so rerun is idempotent
     try:

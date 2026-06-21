@@ -61,7 +61,10 @@ class SemanticEngine:
                     return
 
                 self._model = SentenceTransformer(MODEL_NAME)
-                client = chromadb.PersistentClient(path=CHROMA_DIR)
+                client = chromadb.PersistentClient(
+                    path=CHROMA_DIR,
+                    settings=chromadb.Settings(anonymized_telemetry=False),
+                )
                 self._collection = client.get_collection(COLLECTION_NAME)
                 vector_count = self._collection.count()
                 if vector_count == 0:
