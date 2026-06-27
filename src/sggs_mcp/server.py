@@ -29,6 +29,7 @@ IMPORTANT FOR THE AI MODEL USING THESE TOOLS:
 from __future__ import annotations
 
 import json
+import threading
 import unicodedata
 import re
 from mcp.server.fastmcp import FastMCP
@@ -36,7 +37,7 @@ from mcp.server.fastmcp import FastMCP
 from .config import data_dir
 
 # ---------------------------------------------------------------------------
-# Data loading
+# Data loading — background thread so uvicorn binds immediately on startup
 # ---------------------------------------------------------------------------
 
 DATA_DIR = data_dir()
@@ -48,35 +49,22 @@ def _load_jsonl(filename: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-_lines_raw   = _load_jsonl("sggs_lines.jsonl")
-_shabads_raw = _load_jsonl("sggs_shabads.jsonl")
-_angs_raw    = _load_jsonl("sggs_angs.jsonl")
-_concepts_raw = _load_jsonl("sggs_concepts.jsonl")
+# Globals start empty; populated by _startup_load() in a background thread.
+_lines_raw:    list[dict] = []
+_shabads_raw:  list[dict] = []
+_angs_raw:     list[dict] = []
+_concepts_raw: list[dict] = []
 
-# ---------------------------------------------------------------------------
-# Primary indexes
-# ---------------------------------------------------------------------------
+line_index:    dict[str, dict]       = {}
+shabad_index:  dict[str, dict]       = {}
+ang_index:     dict[int, dict]       = {}
+concept_index: dict[str, dict]       = {}
+author_index:  dict[str, list[dict]] = {}
+raaga_index:   dict[str, list[dict]] = {}
+ang_pa_index:  dict[int, str]        = {}
 
-line_index:    dict[str, dict] = {r["line_id"]: r   for r in _lines_raw}
-shabad_index:  dict[str, dict] = {r["shabad_id"]: r for r in _shabads_raw}
-ang_index:     dict[int, dict] = {r["ang"]: r        for r in _angs_raw}
-concept_index: dict[str, dict] = {r["concept"].lower(): r for r in _concepts_raw}
-
-author_index: dict[str, list[dict]] = {}
-for _r in _lines_raw:
-    author_index.setdefault(_r.get("author", "").lower(), []).append(_r)
-
-raaga_index: dict[str, list[dict]] = {}
-for _r in _lines_raw:
-    raaga_index.setdefault(_r.get("raaga", "").lower(), []).append(_r)
-
-# Punjabi translation per ang: ang → concatenated translation_pa from all lines
-ang_pa_index: dict[int, str] = {}
-for _r in _lines_raw:
-    _pa = _r.get("translation_pa", "").strip()
-    if _pa:
-        ang_pa_index.setdefault(_r["ang"], []).append(_pa)  # type: ignore[arg-type]
-ang_pa_index = {a: "\n".join(parts) for a, parts in ang_pa_index.items()}  # type: ignore[assignment]
+_data_ready = threading.Event()
+_data_error: str | None = None
 
 # ---------------------------------------------------------------------------
 # Lexical helpers
@@ -143,15 +131,68 @@ def _score_fuzzy(
     return score
 
 
-# Fix 8: Precompute token sets alongside skeleton sets for every line at startup.
-for _r in _lines_raw:
-    _r["_roman_norm"]  = _norm(_r.get("roman", ""))
-    _r["_eng_norm"]    = _norm(_r.get("normalized_english_translation", ""))
-    _r["_roman_toks"]  = set(_r["_roman_norm"].split())
-    _r["_eng_toks"]    = set(_r["_eng_norm"].split())
-    # Fix 3: filter empty skeletons out of the precomputed sets.
-    _r["_roman_skels"] = {s for w in _r["_roman_toks"] if (s := _skel(w))}
-    _r["_eng_skels"]   = {s for w in _r["_eng_toks"]   if (s := _skel(w))}
+def _startup_load() -> None:
+    """Load all JSONL data + build indexes in a background thread."""
+    global _lines_raw, _shabads_raw, _angs_raw, _concepts_raw
+    global line_index, shabad_index, ang_index, concept_index
+    global author_index, raaga_index, ang_pa_index, _data_error
+    try:
+        lines    = _load_jsonl("sggs_lines.jsonl")
+        shabads  = _load_jsonl("sggs_shabads.jsonl")
+        angs     = _load_jsonl("sggs_angs.jsonl")
+        concepts = _load_jsonl("sggs_concepts.jsonl")
+
+        l_idx = {r["line_id"]: r    for r in lines}
+        s_idx = {r["shabad_id"]: r  for r in shabads}
+        a_idx = {r["ang"]: r        for r in angs}
+        c_idx = {r["concept"].lower(): r for r in concepts}
+
+        a_idx2: dict[str, list[dict]] = {}
+        r_idx:  dict[str, list[dict]] = {}
+        pa_tmp: dict[int, list[str]]  = {}
+        for r in lines:
+            a_idx2.setdefault(r.get("author", "").lower(), []).append(r)
+            r_idx.setdefault(r.get("raaga", "").lower(), []).append(r)
+            pa = r.get("translation_pa", "").strip()
+            if pa:
+                pa_tmp.setdefault(r["ang"], []).append(pa)
+        pa_idx: dict[int, str] = {a: "\n".join(parts) for a, parts in pa_tmp.items()}
+
+        for r in lines:
+            r["_roman_norm"]  = _norm(r.get("roman", ""))
+            r["_eng_norm"]    = _norm(r.get("normalized_english_translation", ""))
+            r["_roman_toks"]  = set(r["_roman_norm"].split())
+            r["_eng_toks"]    = set(r["_eng_norm"].split())
+            r["_roman_skels"] = {s for w in r["_roman_toks"] if (s := _skel(w))}
+            r["_eng_skels"]   = {s for w in r["_eng_toks"]   if (s := _skel(w))}
+
+        _lines_raw    = lines
+        _shabads_raw  = shabads
+        _angs_raw     = angs
+        _concepts_raw = concepts
+        line_index    = l_idx
+        shabad_index  = s_idx
+        ang_index     = a_idx
+        concept_index = c_idx
+        author_index  = a_idx2
+        raaga_index   = r_idx
+        ang_pa_index  = pa_idx
+    except Exception as exc:
+        _data_error = str(exc)
+    finally:
+        _data_ready.set()
+
+
+threading.Thread(target=_startup_load, daemon=True, name="sggs-data-loader").start()
+
+
+def _data_check() -> str | None:
+    """Block until data loaded (max 5 min). Return error JSON string on failure."""
+    if not _data_ready.wait(timeout=300):
+        return json.dumps({"error": "Server still loading data. Please retry in a moment."})
+    if _data_error:
+        return json.dumps({"error": f"Server data load error: {_data_error}"})
+    return None
 
 
 def _has_gurmukhi(s: str) -> bool:
@@ -298,6 +339,8 @@ def smart_search(query: str, limit: int = 5) -> str:
     Returns: matching verses with ang, author, gurmukhi, roman, translation.
     The 'routed_to' field shows which path was taken.
     """
+    if (err := _data_check()):
+        return err
     if _looks_like_gurbani_quote(query):
         raw  = find_line(query, limit=limit)
         data = json.loads(raw)
@@ -360,6 +403,8 @@ def find_line(quote: str, limit: int = 5) -> str:
 
     IMPORTANT: Each call is independent. Do not assume the answer from prior conversation.
     """
+    if (err := _data_check()):
+        return err
     is_gurmukhi   = _has_gurmukhi(quote)
     is_devanagari = _has_devanagari(quote)
     is_arabic     = _has_arabic(quote)
@@ -513,6 +558,8 @@ def semantic_search(query: str, limit: int = 8) -> str:
     IMPORTANT: Each call is fully independent. Do not reference previous results.
     Run this tool fresh for every new question — never assume from conversation history.
     """
+    if (err := _data_check()):
+        return err
     if not _semantic_engine.is_ready():
         return json.dumps({
             "error": f"Semantic engine not ready: {_semantic_engine.status()}",
@@ -584,6 +631,8 @@ def search_translation(query: str, limit: int = 10) -> str:
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
     """
+    if (err := _data_check()):
+        return err
     q_tok = _tokens(_norm(query))
     if not q_tok:
         return json.dumps({"error": "Empty query."})
@@ -634,6 +683,8 @@ def search_gurmukhi(query: str, limit: int = 10) -> str:
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
     """
+    if (err := _data_check()):
+        return err
     if _has_gurmukhi(query):
         scored = []
         for r in _lines_raw:
@@ -702,6 +753,8 @@ def get_ang(ang: int) -> str:
     IMPORTANT: Each call is independent. Do not reuse prior results.
     When the user asks for content of an ang in Punjabi, use translation_pa.
     """
+    if (err := _data_check()):
+        return err
     rec = ang_index.get(ang)
     if not rec:
         return f"Ang {ang} not found. Valid range: 1–1430."
@@ -745,6 +798,8 @@ def get_shabad(shabad_id: str) -> str:
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
     """
+    if (err := _data_check()):
+        return err
     rec = shabad_index.get(shabad_id.upper())
     if not rec:
         return f"Shabad '{shabad_id}' not found."
@@ -780,6 +835,8 @@ def search_by_author(author: str, limit: int = 10) -> str:
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
     """
+    if (err := _data_check()):
+        return err
     key = author.lower()
     matches = []
     for stored_key, lines in author_index.items():
@@ -816,6 +873,8 @@ def search_by_raaga(raaga: str, limit: int = 10) -> str:
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
     """
+    if (err := _data_check()):
+        return err
     key = raaga.lower()
     matches = []
     for stored_key, lines in raaga_index.items():
@@ -860,6 +919,8 @@ def get_concept(concept: str) -> str:
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
     """
+    if (err := _data_check()):
+        return err
     key = concept.lower()
     rec = concept_index.get(key)
     if not rec:
@@ -905,6 +966,8 @@ def get_line(line_id: str) -> str:
 
     IMPORTANT: Each call is independent. Do not reuse prior results.
     """
+    if (err := _data_check()):
+        return err
     rec = line_index.get(line_id.upper())
     if not rec:
         return f"Line '{line_id}' not found."
