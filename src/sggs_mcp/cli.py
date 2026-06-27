@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 from . import __version__
-from .config import DATA_ENV_VAR, chroma_dir, data_dir, database_path, missing_data_files
+from .config import DATA_ENV_VAR, chroma_dir, data_dir, database_path, embeddings_path, embedding_meta_path, missing_data_files
 
 
 def _ensure_archive_target(root: Path, target: Path, name: str) -> None:
@@ -29,16 +29,19 @@ def run_server() -> int:
 
 
 def run_server_http(host: str = "0.0.0.0", port: int = 8000) -> int:
-    from .server import mcp
+    import os
 
-    mcp.run(transport="streamable-http", host=host, port=port)
+    port = int(os.environ.get("PORT", port))
+    from .server import mcp
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.run(transport="streamable-http")
     return 0
 
 
 def doctor() -> int:
     print(f"sggs-mcp {__version__}")
     print(f"Data directory: {data_dir()}")
-    print(f"Chroma directory: {chroma_dir()}")
     print(f"Database path: {database_path()}")
 
     ok = True
@@ -51,13 +54,26 @@ def doctor() -> int:
     else:
         print("\nData files: OK")
 
-    if chroma_dir().exists():
-        print("Semantic index: OK")
+    emb = embeddings_path()
+    meta = embedding_meta_path()
+    if emb.exists() and meta.exists():
+        try:
+            from .search_engine import engine as _eng
+            n = _eng.count()
+            if n > 0:
+                size_mb = emb.stat().st_size / 1024 / 1024
+                print(f"Semantic index: OK ({n} vectors, {size_mb:.0f} MB numpy)")
+            else:
+                ok = False
+                print("Semantic index: EMPTY — run `sggs-mcp build-index`.")
+        except Exception as exc:
+            print(f"Semantic index: file present but engine error: {exc}")
     else:
         ok = False
-        print("Semantic index: missing. Run `sggs-mcp build-index` after data extraction.")
+        missing_idx = [p for p in (emb, meta) if not p.exists()]
+        print(f"Semantic index: missing ({', '.join(str(p.name) for p in missing_idx)}) — run `sggs-mcp build-index`.")
 
-    for package in ("mcp", "sentence_transformers", "chromadb"):
+    for package in ("mcp", "sentence_transformers"):
         if importlib.util.find_spec(package) is None:
             ok = False
             print(f"Dependency missing: {package}")
