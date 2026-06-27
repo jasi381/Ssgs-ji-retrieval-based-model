@@ -31,6 +31,14 @@ def chroma_dir() -> Path:
     return data_dir() / "chroma"
 
 
+def embeddings_path() -> Path:
+    return data_dir() / "embeddings.npy"
+
+
+def embedding_meta_path() -> Path:
+    return data_dir() / "embedding_meta.jsonl"
+
+
 def database_path() -> Path:
     configured = os.environ.get(DB_ENV_VAR)
     if configured:

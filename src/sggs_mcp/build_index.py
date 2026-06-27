@@ -2,108 +2,88 @@
 Build multilingual semantic vector index for SGGS MCP.
 
 Reads output/embedding_chunks.jsonl, embeds each chunk with
-intfloat/multilingual-e5-base (offline, no API key needed),
-and persists a chromadb collection at output/chroma/.
+intfloat/multilingual-e5-base, and saves:
+  output/embeddings.npy       — float16 array [N, 768], cross-platform portable
+  output/embedding_meta.jsonl — one JSON row per chunk with chunk metadata
 
-Run once after extract_multilingual.py. Safe to rerun — clears the
-old collection and rebuilds.
+Cross-platform: .npy files are endian-aware and work on macOS/Linux/Windows
+without rebuild — no ChromaDB HNSW binaries involved.
 
 Usage:
-    python3 scripts/build_index.py
+    sggs-mcp build-index
 """
 
 import json
 import sys
 import time
 
-from .config import chroma_dir, data_dir
+import numpy as np
+
+from .config import data_dir
 
 CHUNKS_JSONL = data_dir() / "embedding_chunks.jsonl"
-CHROMA_DIR = str(chroma_dir())
-COLLECTION_NAME = "sggs_multilingual"
+EMBEDDINGS_NPY = data_dir() / "embeddings.npy"
+META_JSONL = data_dir() / "embedding_meta.jsonl"
 MODEL_NAME = "intfloat/multilingual-e5-base"
-BATCH_SIZE = 256  # safe for 8 GB RAM
+BATCH_SIZE = 256
 
 
-def main():
+def main() -> None:
     print(f"Loading chunks from {CHUNKS_JSONL} ...")
-    chunks = []
+    chunks: list[dict] = []
     with open(CHUNKS_JSONL, encoding="utf-8") as f:
         for raw in f:
             if raw.strip():
                 chunks.append(json.loads(raw))
-    print(f"  {len(chunks)} chunks loaded.")
+    total = len(chunks)
+    print(f"  {total} chunks loaded.")
 
     print(f"Loading model {MODEL_NAME} (downloads once, cached) ...")
     t0 = time.time()
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(MODEL_NAME)
-    print(f"  Model ready in {time.time()-t0:.1f}s")
+    print(f"  Model ready in {time.time() - t0:.1f}s")
 
-    print(f"Opening chromadb at {CHROMA_DIR} ...")
-    import chromadb
-    client = chromadb.PersistentClient(
-        path=CHROMA_DIR,
-        settings=chromadb.Settings(anonymized_telemetry=False),
-    )
-
-    # Clear existing collection so rerun is idempotent
-    try:
-        client.delete_collection(COLLECTION_NAME)
-        print("  Deleted existing collection.")
-    except Exception:
-        pass
-    collection = client.create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
-
-    total = len(chunks)
-    embedded = 0
+    print("Embedding chunks ...")
+    all_embeddings: list[np.ndarray] = []
     t_embed = time.time()
 
     for i in range(0, total, BATCH_SIZE):
         batch = chunks[i : i + BATCH_SIZE]
-
-        # e5 prefix: "passage: " for documents
         texts = ["passage: " + ch["text"] for ch in batch]
-        embeddings = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
+        embs = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
+        all_embeddings.append(embs.astype(np.float16))
 
-        ids = [ch["chunk_id"] for ch in batch]
-        metadatas = [
-            {
-                "chunk_type": ch["chunk_type"],
-                "ang": ch["ang"],
-                "author": ch["author"],
-                "raaga": ch["raaga"],
-                "line_ids": ch["line_ids"],
-                "shabad_ids": ch["shabad_ids"],
-            }
-            for ch in batch
-        ]
-        documents = [ch["text"] for ch in batch]
-
-        collection.add(
-            ids=ids,
-            embeddings=embeddings.tolist(),
-            metadatas=metadatas,
-            documents=documents,
-        )
-
-        embedded += len(batch)
+        embedded = i + len(batch)
         elapsed = time.time() - t_embed
         rate = embedded / elapsed if elapsed > 0 else 0
         eta = (total - embedded) / rate if rate > 0 else 0
-        print(
-            f"  {embedded}/{total} embedded | {rate:.0f}/s | ETA {eta:.0f}s    ",
-            end="\r",
-            flush=True,
-        )
+        print(f"  {embedded}/{total} | {rate:.0f}/s | ETA {eta:.0f}s    ", end="\r", flush=True)
 
-    elapsed = time.time() - t_embed
-    print(f"\n  Done. {total} chunks indexed in {elapsed:.1f}s.")
-    print(f"  Collection '{COLLECTION_NAME}' persisted at {CHROMA_DIR}")
-    print("\nIndex built successfully.")
+    print()
+    arr = np.concatenate(all_embeddings, axis=0)  # [N, 768] float16
+    np.save(str(EMBEDDINGS_NPY), arr)
+    size_mb = EMBEDDINGS_NPY.stat().st_size / 1024 / 1024
+    print(f"  Saved embeddings: {arr.shape}, float16, {size_mb:.0f} MB → {EMBEDDINGS_NPY}")
+
+    print("Saving metadata ...")
+    with open(META_JSONL, "w", encoding="utf-8") as f:
+        for ch in chunks:
+            row = {
+                "chunk_id":   ch.get("chunk_id", ""),
+                "chunk_type": ch.get("chunk_type", ""),
+                "ang":        ch.get("ang", ""),
+                "author":     ch.get("author", ""),
+                "raaga":      ch.get("raaga", ""),
+                "line_ids":   ch.get("line_ids", "[]"),
+                "shabad_ids": ch.get("shabad_ids", "[]"),
+                "text":       ch.get("text", ""),
+            }
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    print(f"  Saved metadata: {total} rows → {META_JSONL}")
+
+    elapsed_total = time.time() - t_embed
+    print(f"\nIndex built: {total} chunks in {elapsed_total:.1f}s")
 
 
 if __name__ == "__main__":
